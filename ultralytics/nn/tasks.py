@@ -69,6 +69,9 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     v10Detect,
 )
+
+from ultralytics.nn.modules.pretrained_vit import DinoV2Patches
+
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
@@ -1553,6 +1556,7 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             C2fCIB,
             A2C2f,
+            DinoV2Patches,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
