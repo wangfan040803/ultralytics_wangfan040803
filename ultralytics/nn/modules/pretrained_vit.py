@@ -1,6 +1,42 @@
+import os
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.hub import load
+
+# Compatibility: PyTorch<2.0 does not expose F.scaled_dot_product_attention (or has a different internal signature).
+# DINOv2 expects torch.nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
+# is_causal=False, scale=None) -> attn_output
+if not hasattr(F, "scaled_dot_product_attention"):
+
+    def _sdpa_fallback(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
+        # query/key/value: (..., L, E) and (..., S, E) typically (B, heads, seq, head_dim)
+        d = query.size(-1)
+        scale_factor = (1.0 / (d**0.5)) if scale is None else scale
+
+        attn = torch.matmul(query, key.transpose(-2, -1)) * scale_factor  # (..., L, S)
+
+        if is_causal:
+            l, s = attn.size(-2), attn.size(-1)
+            causal = torch.ones((l, s), device=attn.device, dtype=torch.bool).triu(1)
+            attn = attn.masked_fill(causal, float("-inf"))
+
+        if attn_mask is not None:
+            # Support bool masks (True=mask) and additive masks (float with -inf)
+            if attn_mask.dtype == torch.bool:
+                attn = attn.masked_fill(attn_mask, float("-inf"))
+            else:
+                attn = attn + attn_mask
+
+        attn = torch.softmax(attn, dim=-1)
+        if dropout_p and dropout_p > 0:
+            attn = torch.dropout(attn, p=dropout_p, train=True)
+
+        return torch.matmul(attn, value)
+
+    F.scaled_dot_product_attention = _sdpa_fallback
 
 # from aim.v2.utils import load_pretrained
 
@@ -18,24 +54,105 @@ dino_backbones = {
 
 
 class DinoV2Patches(nn.Module):
-    def __init__(self, in_chanels=3, out_channels=768, size="base"):
+    def __init__(self, in_chanels=3, out_channels=None, size="base", freeze=True):
         from torchvision import transforms
+
         super(DinoV2Patches, self).__init__()
         self.size = size
-        self.backbone = load("dinov3", dino_backbones[self.size]["name"], pretrained=True, source='local', weights=dino_backbones[self.size]["name"]+'.pth')
-        self.backbone.eval()
+        self.freeze = bool(freeze)
+
+        if self.size not in dino_backbones:
+            raise KeyError(f"Unknown size '{self.size}'. Options: {list(dino_backbones.keys())}")
+
+        model_name = dino_backbones[self.size]["name"]
+        self.patch_size = int(dino_backbones[self.size]["patch_size"])
+        embed_dim = int(dino_backbones[self.size]["embedding_size"])
+        self.out_channels = int(out_channels) if out_channels is not None else embed_dim
+
+        if self.out_channels != embed_dim:
+            raise ValueError(
+                f"out_channels({self.out_channels}) must match backbone embedding_size({embed_dim}) for size='{self.size}'."
+            )
+
+        # Choose repo source:
+        # - DINOv2: load from GitHub torch.hub (auto-download)
+        # - DINOv3: load from local repo folder containing hubconf.py (because repo naming/availability may vary)
+        if self.size.startswith("dinov3_"):
+            hub_dir = self._resolve_local_repo("dinov3")
+            try:
+                self.backbone = load(hub_dir, model_name, pretrained=True, source="local", weights=f"{model_name}.pth")
+            except ImportError as e:
+                # Common failure: older torchvision without transforms.v2
+                raise ImportError(
+                    "Failed to import dependencies when loading DINOv3 from local torch.hub repo.\n"
+                    "If the error mentions 'torchvision.transforms.v2', please upgrade torchvision in your training env.\n"
+                    f"Original error: {e}"
+                )
+        else:
+            # DINOv2 GitHub torch.hub fallback (requires internet on first run)
+            self.backbone = load("facebookresearch/dinov2", model_name, pretrained=True)
+
+        # Freeze control
+        self._apply_freeze()
         IMAGENET_MEAN = (0.485, 0.456, 0.406)
         IMAGENET_STD = (0.229, 0.224, 0.225)
-        self.out_channels = out_channels
         self.inet_norm = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+
+    def _apply_freeze(self):
+        """Apply freeze setting to backbone params and mode."""
+        if self.freeze:
+            self.backbone.eval()
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+        else:
+            # Let backbone be trainable; actual train/eval mode will follow this module's mode.
+            for p in self.backbone.parameters():
+                p.requires_grad = True
+
+    def train(self, mode: bool = True):
+        """Override to keep backbone frozen in eval when freeze=True."""
+        super().train(mode)
+        if self.freeze:
+            self.backbone.eval()
+        else:
+            self.backbone.train(mode)
+        return self
+
+    @staticmethod
+    def _resolve_local_repo(repo_name: str) -> str:
+        """Find local torch.hub repo folder containing hubconf.py."""
+        candidates = []
+
+        env_key = "DINOV3_HUB_DIR" if repo_name == "dinov3" else "DINOV2_HUB_DIR"
+        env = os.getenv(env_key)
+        if env:
+            candidates.append(Path(env))
+
+        # Common locations: <project_root>/<repo_name> and CWD/<repo_name>
+        try:
+            project_root = Path(__file__).resolve().parents[3]
+            candidates.append(project_root / repo_name)
+        except Exception:
+            pass
+        candidates.append(Path.cwd() / repo_name)
+
+        for p in candidates:
+            if (p / "hubconf.py").is_file():
+                return str(p)
+
+        raise FileNotFoundError(
+            f"Local torch.hub repo '{repo_name}' not found (missing hubconf.py).\n"
+            f"Put it at <this_project>/{repo_name}/hubconf.py or set env var {env_key}=D:/path/to/{repo_name}."
+        )
 
     def transform(self, x):
         # x should have shape (B, C, H, W)
         b, c, h, w = x.shape
 
-        # Compute how many pixels to drop to make height/width multiples of 14
-        h_new = h - (h % 16)
-        w_new = w - (w % 16)
+        # Crop to make H/W multiples of patch size
+        p = self.patch_size
+        h_new = h - (h % p)
+        w_new = w - (w % p)
 
         dh = h - h_new  # total pixels to drop in height
         dw = w - w_new  # total pixels to drop in width
@@ -58,14 +175,18 @@ class DinoV2Patches(nn.Module):
         return x_cropped
 
     def forward(self, x):
-        with torch.no_grad():
-            x = self.transform(x)
-            batch_size = x.shape[0]
-            # print(x.shape)
-            mask_dim = (x.shape[2] / 16, x.shape[3] / 16)
+        x = self.transform(x)
+        batch_size = x.shape[0]
+        h_tokens = x.shape[2] // self.patch_size
+        w_tokens = x.shape[3] // self.patch_size
+
+        if self.freeze:
             with torch.no_grad():
-                x = self.backbone.forward_features(x)
-                x = x["x_norm_patchtokens"]
-                x = x.permute(0, 2, 1)
-                x = x.reshape(batch_size, self.out_channels, int(mask_dim[0]), int(mask_dim[1]))
-            return x
+                feats = self.backbone.forward_features(x)
+        else:
+            feats = self.backbone.forward_features(x)
+
+        x = feats["x_norm_patchtokens"]  # (B, N, C)
+        x = x.permute(0, 2, 1)  # (B, C, N)
+        x = x.reshape(batch_size, self.out_channels, int(h_tokens), int(w_tokens))
+        return x

@@ -11,18 +11,26 @@ scales:
 # Backbone configuration
 backbone:
   # [from, repeats, module, args]
-  - [-1, 1, DinoV2Patches, [384, 'small']] # Outputs 384 channels
+  - [-1, 1, DinoV2Patches, [384, 'small']] # Outputs 384 channels (freeze defaults to True)
+  # - [-1, 1, DinoV2Patches, [384, 'small', False]] # Unfreeze backbone (trainable)
 
   # Other backbones available
   # - [-1, 1, DinoV2Patches, [768, 'base']] # Outputs 768 channels
+  # - [-1, 1, DinoV2Patches, [768, 'base', False]] # Outputs 768 channels (unfrozen)
   # - [-1, 1, DinoV2Patches, [1024, 'large']] # Outputs 1024 channels
+  # - [-1, 1, DinoV2Patches, [1024, 'large', False]] # Outputs 1024 channels (unfrozen)
   # - [-1, 1, DinoV2Patches, [1536, 'giant']] # Outputs 1536 channels
+  # - [-1, 1, DinoV2Patches, [1536, 'giant', False]] # Outputs 1536 channels (unfrozen)
 
   # dinov3
   # - [-1, 1, DinoV2Patches, [1536, 'dinov3_convnext_large']] # Outputs 1536 channels (patch_size=14)
+  # - [-1, 1, DinoV2Patches, [1536, 'dinov3_convnext_large' , False]] # Outputs 1536 channels (patch_size=14)
   # - [-1, 1, DinoV2Patches, [384, 'dinov3_vits16']] # Outputs 384 channels (patch_size=16)
+  # - [-1, 1, DinoV2Patches, [384, 'dinov3_vits16', False]] # Outputs 384 channels (patch_size=16)
   # - [-1, 1, DinoV2Patches, [4096, 'dinov3_vit7b16']] # Outputs 4096 channels (patch_size=16)
+  # - [-1, 1, DinoV2Patches, [4096, 'dinov3_vit7b16', False]] # Outputs 4096 channels (patch_size=16)
   # - [-1, 1, DinoV2Patches, [1280, 'dinov3_vith16plus']] # Outputs 1280 channels (patch_size=16)
+  # - [-1, 1, DinoV2Patches, [1280, 'dinov3_vith16plus', False]] # Outputs 1280 channels (patch_size=16)
   
 
 
