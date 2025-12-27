@@ -1,2 +1,2 @@
 # ultralytics_wangfan040803
-ultralytics的自定义
+ultralytics的自定义仓库
