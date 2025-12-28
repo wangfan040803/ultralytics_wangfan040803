@@ -11,8 +11,8 @@ scales:
 # Backbone configuration
 backbone:
   # [from, repeats, module, args]
-  - [-1, 1, DinoV2Patches, [384, 'small']] # Outputs 384 channels (freeze defaults to True)
-  # - [-1, 1, DinoV2Patches, [384, 'small', False]] # Unfreeze backbone (trainable)
+  # - [-1, 1, DinoV2Patches, [384, 'small']] # Outputs 384 channels (freeze defaults to True)
+  - [-1, 1, DinoV2Patches, [384, 'small', False]] # Unfreeze backbone (trainable)
 
   # Other backbones available
   # - [-1, 1, DinoV2Patches, [768, 'base']] # Outputs 768 channels

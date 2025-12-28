@@ -12,11 +12,23 @@ from torch.hub import load
 if not hasattr(F, "scaled_dot_product_attention"):
 
     def _sdpa_fallback(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
-        # query/key/value: (..., L, E) and (..., S, E) typically (B, heads, seq, head_dim)
-        d = query.size(-1)
-        scale_factor = (1.0 / (d**0.5)) if scale is None else scale
+        """Scaled dot-product attention fallback for torch<2.0.
 
-        attn = torch.matmul(query, key.transpose(-2, -1)) * scale_factor  # (..., L, S)
+        Notes:
+            - DINOv2 often runs under AMP. A naive FP16 softmax attention can overflow and produce NaNs.
+            - We compute attention weights in FP32 with a stable softmax, then cast back.
+        """
+
+        # query/key/value: (..., L, E) and (..., S, E) typically (B, heads, seq, head_dim)
+        orig_dtype = query.dtype
+        q = query.float()
+        k = key.float()
+        v = value.float()
+
+        d = q.size(-1)
+        scale_factor = (1.0 / (d**0.5)) if scale is None else float(scale)
+
+        attn = torch.matmul(q, k.transpose(-2, -1)) * scale_factor  # (..., L, S)
 
         if is_causal:
             l, s = attn.size(-2), attn.size(-1)
@@ -28,13 +40,21 @@ if not hasattr(F, "scaled_dot_product_attention"):
             if attn_mask.dtype == torch.bool:
                 attn = attn.masked_fill(attn_mask, float("-inf"))
             else:
-                attn = attn + attn_mask
+                attn = attn + attn_mask.float()
 
-        attn = torch.softmax(attn, dim=-1)
-        if dropout_p and dropout_p > 0:
-            attn = torch.dropout(attn, p=dropout_p, train=True)
+        # Stable softmax: subtract max over last dim, and guard fully-masked rows.
+        finite = torch.isfinite(attn)
+        row_has_finite = finite.any(dim=-1, keepdim=True)
+        attn_safe = torch.where(finite, attn, torch.tensor(-1e9, device=attn.device, dtype=attn.dtype))
+        attn_safe = attn_safe - attn_safe.max(dim=-1, keepdim=True).values
+        weights = torch.softmax(attn_safe, dim=-1)
+        weights = weights * row_has_finite.to(weights.dtype)  # fully-masked rows -> all zeros
 
-        return torch.matmul(attn, value)
+        if dropout_p and dropout_p > 0 and torch.is_grad_enabled():
+            weights = torch.dropout(weights, p=dropout_p, train=True)
+
+        out = torch.matmul(weights, v)
+        return out.to(orig_dtype)
 
     F.scaled_dot_product_attention = _sdpa_fallback
 
